@@ -180,7 +180,14 @@ _WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
 # state that was mostly links scored a language it does not contain, and two domains were enough to
 # cross the margin below. A sentence-final period (`arrivato.`) keeps its word: the pattern needs
 # word characters on both sides of the dot.
-_IDENTIFIER = re.compile(r"[\w-]*(?:[.@][\w-]+)+", re.UNICODE)
+# The lookbehind is what keeps this linear. Without it the greedy `[\w-]*` is retried
+# at every offset inside a run of word characters, and each attempt rescans the run
+# before failing on the absent `[.@]` -- quadratic in the run's length, so 4000
+# characters of one token cost 205 ms against 0.45 ms for ordinary prose. It removes
+# no match: `[\w-]` and `[.@]` are disjoint, so an attempt from inside a run consumes
+# to exactly the same separator as an attempt from the run's start and the two always
+# succeed or fail together -- a leftmost match can only ever begin at a run start.
+_IDENTIFIER = re.compile(r"(?<![\w-])[\w-]*(?:[.@][\w-]+)+", re.UNICODE)
 
 
 def _iter_text(state: Union[str, dict, list, None], _depth: int = 0) -> List[str]:

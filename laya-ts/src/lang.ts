@@ -124,7 +124,11 @@ const SHARED_WORDS: Set<string> = (() => {
 })();
 
 const WORD_RE = /[^\W\d_]+/gu;
-const IDENTIFIER_RE = /[\p{L}\p{N}_-]*(?:[.@][\p{L}\p{N}_-]+)+/gu;
+// Lookbehind for the same reason as the Python side (see laya/lang.py): without it the
+// greedy prefix is retried at every offset inside a run of word characters, which is
+// quadratic in the run's length -- 50 000 characters of one token took 1540 ms here.
+// It removes no match, because a leftmost match can only begin at a run start.
+const IDENTIFIER_RE = /(?<![\p{L}\p{N}_-])[\p{L}\p{N}_-]*(?:[.@][\p{L}\p{N}_-]+)+/gu;
 const IS_ALPHA_RE = /\p{L}/u;
 
 // Python uses two different boundaries on purpose: detect_script/script_profile count the IPA
