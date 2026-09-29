@@ -242,7 +242,7 @@ def _state_length_lower_bound_over(state: Any, cap: int) -> int:
     while stack and budget > 0:
         budget -= 1
         item = stack.pop()
-        if isinstance(item, str):
+        if type(item) is str:
             total += len(item)
             if total > cap:
                 return total
@@ -252,13 +252,21 @@ def _state_length_lower_bound_over(state: Any, cap: int) -> int:
             stack.extend(item.values())
         elif type(item) is list or type(item) is tuple:
             stack.extend(item)
+        elif item is None or type(item) in (int, float, bool):
+            # A JSON scalar contributes at least one character, and counting it as zero keeps this a
+            # lower bound -- so the walk CONTINUES. Returning here instead meant one trailing number
+            # defeated the whole probe: `{"body": <2 MiB>, "n": 1}` cost 6.85 ms against 0.001 ms for
+            # the same state without the `1`, and it was order-dependent, because the stack pops
+            # LIFO. `[{"role": .., "content": <big>, "ts": 1700000000}]` -- an ordinary conversation
+            # turn -- was defeated the same way.
+            continue
         else:
-            # EXACT types only, deliberately. A `dict` subclass may override `values()` while
-            # `json.dumps` reads the real items, which would let this "lower bound" exceed the true
-            # length -- measured: a 13-character state refused as `60000 > 50000`. Anything else,
-            # including a subclass, a set or a cycle, is handed to the encoder, which decides the
-            # size or raises and becomes the 400 below. `json.loads` only ever builds exact types,
-            # so no HTTP request takes this branch.
+            # EXACT types only, deliberately. A `dict` subclass may override `values()`, and a `str`
+            # subclass may override `__len__`, while `json.dumps` reads the real contents -- either
+            # would let this "lower bound" exceed the true length. Measured for both: a 13-character
+            # state refused as `60000 > 50000`. A subclass, a set or a cycle is handed to the
+            # encoder instead, which decides the size or raises into the 400 below. `json.loads`
+            # builds only exact types, so no HTTP request reaches this branch.
             return 0
     return 0
 
@@ -292,8 +300,11 @@ def _state_length(state: Any) -> int:
     """
     from fastapi import HTTPException
 
-    if isinstance(state, str):
+    if type(state) is str:
         return len(state)  # `serialize_state` returns a string state unchanged
+    # A `str` SUBCLASS falls through to the encoder on purpose: one understating `__len__` would
+    # otherwise bypass the cap entirely (`len(state) == 1` for a 60 002-character serialization),
+    # and one overstating it would refuse a short state. `json.dumps` reads the real content.
     over = _state_length_lower_bound_over(state, MAX_STATE_CHARS)
     if over:
         # Already past the cap on a lower bound, so serializing the rest cannot change the verdict.

@@ -1165,15 +1165,24 @@ def test_the_early_refusal_reports_a_number_it_measured():
     """
     import laya.serve as serve_mod
     cap = serve_mod.MAX_STATE_CHARS
-    # `cap + 1` is NOT the tell: {"body": "a" * 50001} legitimately sums to exactly that. The
-    # property that distinguishes a measured bound from a fabricated one is `cap < reported <= exact`.
-    for state in ({"body": "x" * 60000}, {"body": "y" * (2 * 1024 * 1024)}, {"a": ["z" * 80000]},
-                  {"body": "a" * (cap + 1)}, ["w" * 60000]):
+    # `cap < reported <= exact` alone is NOT enough: `cap + 1` satisfies it for every oversized
+    # state, so returning `cap + 1` -- the fabricated count this gate was written to remove -- passed
+    # both suites. An earlier revision asserted `reported != cap + 1`, which a legitimate
+    # `{"body": "a" * 50001}` fixture then made fire. The tell is that the bound is the walk's
+    # MEASURED SUM, which is distinctive for every shape here, so assert that.
+    for state, expected_sum in (({"body": "x" * 60000}, 60000),
+                                ({"body": "y" * (2 * 1024 * 1024)}, 2 * 1024 * 1024),
+                                ({"a": ["z" * 80000]}, 80000),
+                                (["w" * 60000], 60000),
+                                ({"body": "a" * (cap + 1)}, cap + 1)):
         exact = len(json.dumps(state, ensure_ascii=False))
         reported = serve_mod._state_length(state)
         assert reported > cap, reported
         assert reported <= exact, \
             "reported %d for a state of %d characters -- a 413 must never overstate" % (reported, exact)
+        assert reported == expected_sum, \
+            "reported %d, but the walk's measured sum for this state is %d -- the number in the 413 " \
+            "is not the one anything counted" % (reported, expected_sum)
 
 
 def test_the_probe_is_bounded_and_falls_through_rather_than_guessing():
@@ -1187,6 +1196,64 @@ def test_the_probe_is_bounded_and_falls_through_rather_than_guessing():
     wide = {("k%06d" % i): "x" for i in range(200000)}
     assert serve_mod._state_length_lower_bound_over(wide, serve_mod.MAX_STATE_CHARS) == 0
     assert serve_mod._state_length(wide) == len(json.dumps(wide, ensure_ascii=False))
+
+
+def test_a_json_scalar_does_not_abort_the_probe(monkeypatch):
+    """A number, bool or null must let the walk CONTINUE, not end it.
+
+    Counting them as zero keeps the sum a lower bound; returning instead meant one trailing integer
+    defeated the whole probe. Measured: `{"body": <2 MiB>, "n": 1}` cost 6.85 ms against 0.001 ms
+    for the same state without the `1`, and it was order-dependent, because the stack pops LIFO --
+    the identical pair cost nothing at the front of the object. `[{"role": .., "content": <big>,
+    "ts": 1700000000}]`, an ordinary conversation turn, was defeated the same way.
+    """
+    import laya.serve as serve_mod
+
+    big = "y" * (2 * 1024 * 1024)
+    for state in ({"body": big, "n": 1},
+                  {"body": big, "ok": True},
+                  {"body": big, "z": None},
+                  {"body": big, "f": 1.5},
+                  [{"role": "user", "content": big, "ts": 1700000000}]):
+        bound = serve_mod._state_length_lower_bound_over(state, serve_mod.MAX_STATE_CHARS)
+        assert bound >= len(big), \
+            "a JSON scalar ended the walk: bound %d for a state holding %d characters" \
+            % (bound, len(big))
+
+    # and the dump is genuinely skipped, not merely reached quickly
+    calls = []
+    real = json.dumps
+    monkeypatch.setattr(serve_mod, "json", SimpleNamespace(dumps=lambda o, **k: (calls.append(k), real(o, **k))[1]))
+    assert serve_mod._state_length({"body": big, "n": 1}) > serve_mod.MAX_STATE_CHARS
+    assert calls == [], "the state was serialized although one value already exceeds the cap"
+
+
+def test_the_probe_walks_exact_strings_only():
+    """A `str` subclass overriding `__len__` must not be measured by the walk.
+
+    Same hazard as the `dict` subclass, and the same 13-character/60000 pair: `json.dumps` reads the
+    real content while `len()` lies, which would let the "lower bound" exceed the true length and
+    refuse a tiny state. The converse matters too -- a subclass UNDERSTATING `__len__` as a
+    top-level state would slip past the cap entirely.
+    """
+    import laya.serve as serve_mod
+
+    class BigLen(str):
+        def __len__(self):
+            return 60000
+
+    class SmallLen(str):
+        def __len__(self):
+            return 1
+
+    state = {"a": BigLen("tiny")}
+    exact = len(json.dumps(state, ensure_ascii=False))
+    assert serve_mod._state_length_lower_bound_over(state, serve_mod.MAX_STATE_CHARS) == 0
+    assert serve_mod._state_length(state) == exact == 13
+
+    over = SmallLen("z" * 60000)
+    assert serve_mod._state_length(over) > serve_mod.MAX_STATE_CHARS, \
+        "a str subclass understating __len__ slipped past the cap"
 
 
 def test_the_probe_walks_exact_container_types_only():
