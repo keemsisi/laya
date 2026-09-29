@@ -1272,3 +1272,50 @@ def test_the_probe_walks_exact_container_types_only():
     exact = len(json.dumps(state, ensure_ascii=False))
     assert serve_mod._state_length_lower_bound_over(state, serve_mod.MAX_STATE_CHARS) == 0
     assert serve_mod._state_length(state) == exact == 13
+
+
+def test_a_type_the_probe_cannot_walk_discards_the_bound_it_had_built():
+    """Hitting an unknown type must abandon the walk entirely, not report what it counted so far.
+
+    `return total` there looks harmless and is not: any non-zero answer is taken as a measured
+    length and the exact `json.dumps` is skipped. A state holding a set alongside a short string
+    then comes back as "30 characters", is accepted, and fails inside `serialize_state` -- which is
+    the 500 this gate exists to turn into a 400.  `return 0` means "not proven", and the encoder
+    decides.
+
+    Reaching it needs the string counted BEFORE the unknown type is seen. `.values()` pushes in
+    order and the walk pops LIFO, so the set has to come FIRST in the dict for the string to be
+    popped first. With the order reversed the set is seen immediately, the bound is 0 either way,
+    and the mutation survives -- which is how this went unnoticed.
+    """
+    import laya.serve as serve_mod
+    from fastapi import HTTPException
+
+    def bound(state):
+        return serve_mod._state_length_lower_bound_over(state, serve_mod.MAX_STATE_CHARS)
+
+    def walk_order(state):
+        order, stack = [], [state]
+        while stack:
+            item = stack.pop()
+            if type(item) is dict:
+                stack.extend(item.values())
+            else:
+                order.append(type(item).__name__)
+        return order
+
+    state = {"a": {1, 2}, "b": "x" * 30}          # set first: the string is walked before the set
+    assert walk_order(state) == ["str", "set"], \
+        "this fixture must count a string before it meets the set, or it pins nothing"
+    assert bound(state) == 0, "a walk that met a type it cannot measure has proven nothing"
+
+    try:
+        serve_mod._state_length(state)
+    except HTTPException as exc:
+        assert exc.status_code == 400, exc.status_code
+        assert "JSON-serializable" in str(exc.detail)
+    else:
+        raise AssertionError("an unserializable state must be a 400, not an accepted length")
+
+    # An oversized string ahead of the set is still refused on the bound, before the encoder.
+    assert bound({"a": {1, 2}, "b": "x" * 60000}) == 60000
