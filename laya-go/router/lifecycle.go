@@ -32,7 +32,10 @@ var ErrClosed = errors.New("router: closed")
 // AgentFactory builds the agent for a checkpoint. It owns where the weights come from, the
 // device and the agent options. It is called at most once at a time per Router and never with a
 // lock held, and ctx is the context of the call that triggered the build. The Router closes the
-// agent it returns, so a factory must return a fresh agent on every call, never one it shares.
+// agent it returns, so a factory must return a fresh agent on every call, never one it shares. A
+// factory must not call Load, Lease, Preload, Unload, UnloadAll or Close on the Router that is
+// calling it: it holds the build token, so a call that builds, or waits for a build, waits for
+// itself.
 type AgentFactory func(ctx context.Context, c Checkpoint) (*agent.Agent, error)
 
 // WithAgentFactory lets the Router load checkpoints. Without it Route works and every load fails.
@@ -57,8 +60,14 @@ type slot struct {
 	agent   *agent.Agent
 	leases  int
 	retired bool // left the Router
-	owns    bool // the Router built it, so the Router closes it
+	own     *own // non-nil when the Router built the agent; Attach clears it
 }
+
+// own is the Router's claim to close an agent it built. It is shared by every slot of that agent,
+// so attaching the agent hands it to the caller even while an earlier, retired slot is leased.
+type own struct{ router bool }
+
+func (s *slot) owns() bool { return s.own != nil && s.own.router }
 
 type inflight struct {
 	done chan struct{}
@@ -75,6 +84,7 @@ type lifecycle struct {
 	loading map[Checkpoint]*inflight
 	max     int
 	closed  bool
+	owners  map[*agent.Agent]*own // agents the Router built and has not closed
 }
 
 func (l *lifecycle) init(f AgentFactory, max int) {
@@ -82,6 +92,7 @@ func (l *lifecycle) init(f AgentFactory, max int) {
 	l.build = make(chan struct{}, 1)
 	l.slots = map[Checkpoint]*slot{}
 	l.loading = map[Checkpoint]*inflight{}
+	l.owners = map[*agent.Agent]*own{}
 }
 
 // outcome is what one acquire did, so its hooks fire after the locks are released.
@@ -107,7 +118,8 @@ func (l *lifecycle) touch(key Checkpoint) {
 // it and the Router built it. mu is held.
 func (l *lifecycle) retire(s *slot, toClose *[]*agent.Agent) {
 	s.retired = true
-	if s.leases <= 0 && s.owns {
+	if s.leases <= 0 && s.owns() {
+		delete(l.owners, s.agent)
 		*toClose = append(*toClose, s.agent)
 	}
 }
@@ -127,10 +139,21 @@ func (l *lifecycle) evictLocked(toClose *[]*agent.Agent) []Checkpoint {
 	return evicted
 }
 
+// safeClose closes a, turning a panic in its session's Close into an error so one bad agent
+// cannot skip the others or the events that follow.
+func safeClose(a *agent.Agent) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("router: closing an agent panicked: %v", r)
+		}
+	}()
+	return a.Close()
+}
+
 func closeAll(agents []*agent.Agent) error {
 	var errs []error
 	for _, a := range agents {
-		if err := a.Close(); err != nil {
+		if err := safeClose(a); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -142,12 +165,13 @@ func (l *lifecycle) release(s *slot) error {
 	var toClose *agent.Agent
 	l.mu.Lock()
 	s.leases--
-	if s.leases <= 0 && s.retired && s.owns {
+	if s.leases <= 0 && s.retired && s.owns() {
 		toClose = s.agent
+		delete(l.owners, s.agent)
 	}
 	l.mu.Unlock()
 	if toClose != nil {
-		return toClose.Close()
+		return safeClose(toClose)
 	}
 	return nil
 }
@@ -214,7 +238,12 @@ func (l *lifecycle) create(ctx context.Context, key Checkpoint) (*agent.Agent, e
 // doBuild is the build this caller owns: mine is the handle the others wait on.
 func (l *lifecycle) doBuild(ctx context.Context, key Checkpoint, mine *inflight, out *outcome) (built *slot, err error) {
 	var toClose []*agent.Agent
-	finish := func() { // mu is held
+	finished := false
+	finish := func() { // mu is held; idempotent
+		if finished {
+			return
+		}
+		finished = true
 		if l.loading[key] == mine {
 			delete(l.loading, key)
 		}
@@ -228,7 +257,9 @@ func (l *lifecycle) doBuild(ctx context.Context, key Checkpoint, mine *inflight,
 		if err != nil {
 			built = nil
 			l.mu.Lock()
-			mine.err = err
+			if mine.err == nil && !finished {
+				mine.err = err
+			}
 			finish()
 			l.mu.Unlock()
 		}
@@ -251,6 +282,10 @@ func (l *lifecycle) doBuild(ctx context.Context, key Checkpoint, mine *inflight,
 	defer releaseBuild()
 
 	l.mu.Lock()
+	if l.closed { // Close came while this caller waited for the token: do not start a build
+		l.mu.Unlock()
+		return nil, ErrClosed
+	}
 	if s := l.slots[key]; s != nil { // built or attached while this caller waited for the build token
 		l.touch(key)
 		s.leases++
@@ -273,7 +308,9 @@ func (l *lifecycle) doBuild(ctx context.Context, key Checkpoint, mine *inflight,
 		toClose = append(toClose, a)
 		out.built, out.agent = true, s.agent
 	} else {
-		built = &slot{agent: a, owns: true, leases: 1}
+		o := &own{router: true}
+		l.owners[a] = o
+		built = &slot{agent: a, own: o, leases: 1}
 		l.slots[key] = built
 		l.order = append(l.order, key)
 		out.evicted = l.evictLocked(&toClose)
@@ -384,9 +421,10 @@ func (r *Router) Load(ctx context.Context, name string) (*agent.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	// After release, so a hook that calls back in does not find this call holding a lease.
-	rerr := r.lc.release(s)
-	if herr := r.dispatchOutcome(key, out); herr != nil || rerr != nil {
+	// The lease is held across the hooks, so a concurrent eviction cannot close ctx.Agent under
+	// OnLoad; it is given back before Load returns.
+	herr := r.dispatchOutcome(key, out)
+	if rerr := r.lc.release(s); herr != nil || rerr != nil {
 		return nil, errors.Join(herr, rerr)
 	}
 	return s.agent, nil
@@ -414,6 +452,10 @@ func (r *Router) Attach(name string, a *agent.Agent) error {
 		return ErrClosed
 	}
 	prev := l.slots[key]
+	if o := l.owners[a]; o != nil { // built here, perhaps evicted but still leased: now the caller's
+		o.router = false
+		delete(l.owners, a)
+	}
 	l.slots[key] = &slot{agent: a}
 	if prev != nil && prev.agent != a { // the same agent changes hands, it is not closed
 		l.retire(prev, &toClose)

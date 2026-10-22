@@ -3,7 +3,8 @@ package router
 // Hooks are laya/hooks.py for the three events a Router raises: on_route, on_load and on_evict. A
 // hook is any value with an OnRoute, OnLoad or OnEvict method; the same value may also be an
 // agent.Hook, as in Python, where one object implements several events. OnLoad and OnEvict run
-// after the Router's lock is released (see lifecycle.go), so a hook may call the Router. Each call of Route
+// after the Router's lock is released (see lifecycle.go), so a hook may call the Router. As in Python, an Unload that races a build of the same checkpoint
+// can fire OnEvict before that build's OnLoad. Each call of Route
 // dispatches over: the process-wide agent.DefaultHooks (which take only an agent.Hook, so a
 // hook that is both embeds agent.BaseHook), the Router's installed hooks, then the
 // call's ForHooks, and a hook without OnRoute is skipped.
