@@ -51,6 +51,7 @@ type Router struct {
 	auto   bool
 	hint   LangHint
 	hk     *hookState
+	lc     lifecycle
 }
 
 // Option configures New.
@@ -63,6 +64,8 @@ type config struct {
 	auto       bool
 	hint       LangHint
 	sources    []source
+	factory    AgentFactory
+	maxLoaded  int
 }
 
 type source struct {
@@ -116,7 +119,7 @@ func WithSourceIn(name, repo, subfolder string) Option {
 // must not call Route on its own Router. A default or source name that is neither a checkpoint nor an alias is an
 // *UnknownModelError. Sources are applied in the order given, the last one for a name winning.
 func New(opts ...Option) (*Router, error) {
-	c := config{def: string(Multilingual), hooks: hookConfig{raise: true}}
+	c := config{def: string(Multilingual), hooks: hookConfig{raise: true}, maxLoaded: DefaultMaxLoaded}
 	for _, o := range opts {
 		if err := o(&c); err != nil {
 			return nil, err
@@ -145,6 +148,7 @@ func New(opts ...Option) (*Router, error) {
 		return nil, err
 	}
 	r.def = def
+	r.lc.init(c.factory, c.maxLoaded)
 	return r, nil
 }
 

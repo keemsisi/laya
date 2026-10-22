@@ -1,8 +1,9 @@
 package router
 
-// Hooks are laya/hooks.py for the one event a pure Router raises, on_route (on_load and on_evict
-// arrive with loading). A hook is any value with an OnRoute method; the same value may also be an
-// agent.Hook, as in Python, where one object implements several events. Each call of Route
+// Hooks are laya/hooks.py for the three events a Router raises: on_route, on_load and on_evict. A
+// hook is any value with an OnRoute, OnLoad or OnEvict method; the same value may also be an
+// agent.Hook, as in Python, where one object implements several events. OnLoad and OnEvict run
+// after the Router's lock is released (see lifecycle.go), so a hook may call the Router. Each call of Route
 // dispatches over: the process-wide agent.DefaultHooks (which take only an agent.Hook, so a
 // hook that is both embeds agent.BaseHook), the Router's installed hooks, then the
 // call's ForHooks, and a hook without OnRoute is skipped.
@@ -54,16 +55,76 @@ type RouteContext struct {
 	Router *Router
 }
 
-// BaseHook implements RouteHook with a no-op, for embedding.
+// LoadHook is a hook that sees a checkpoint being built.
+type LoadHook interface {
+	// OnLoad runs after the Router built and published a checkpoint, once per build, after the
+	// OnEvict calls of the checkpoints that build pushed out.
+	OnLoad(ctx *LoadContext)
+}
+
+// EvictHook is a hook that sees a checkpoint leave the Router.
+type EvictHook interface {
+	// OnEvict runs after a checkpoint left the Router, by LRU eviction, Unload, UnloadAll or
+	// Close. The agent may still be open: it closes when its last lease is released.
+	OnEvict(ctx *EvictContext)
+}
+
+// LoadContext is what an OnLoad hook sees. The agent is the one the Router now serves, which for
+// a build that lost a race with Attach is the attached one.
+type LoadContext struct {
+	// Model is the checkpoint that was built.
+	Model Checkpoint
+	// Agent is the agent serving Model. It can be evicted and closed at any moment; take a Lease
+	// to use it.
+	Agent *agent.Agent
+	// RunID is 32 hex characters, new for each event.
+	RunID string
+	// Router is the Router that loaded.
+	Router *Router
+}
+
+// EvictContext is what an OnEvict hook sees.
+type EvictContext struct {
+	// Model is the checkpoint that left.
+	Model Checkpoint
+	// RunID is 32 hex characters, new for each event.
+	RunID string
+	// Router is the Router it left.
+	Router *Router
+}
+
+// BaseHook implements RouteHook, LoadHook and EvictHook with no-ops, for embedding.
 type BaseHook struct{}
 
 // OnRoute does nothing.
 func (BaseHook) OnRoute(*RouteContext) {}
 
-// HookFuncs is a RouteHook made of a function; nil is a no-op. Use it as *HookFuncs: a value
-// holds a func, which cannot be compared, so RemoveHook could never find it.
+// OnLoad does nothing.
+func (BaseHook) OnLoad(*LoadContext) {}
+
+// OnEvict does nothing.
+func (BaseHook) OnEvict(*EvictContext) {}
+
+// HookFuncs is a RouteHook, LoadHook and EvictHook made of functions; nil is a no-op. Use it as
+// *HookFuncs: a value holds funcs, which cannot be compared, so RemoveHook could never find it.
 type HookFuncs struct {
 	OnRouteFunc func(*RouteContext)
+	OnLoadFunc  func(*LoadContext)
+	OnEvictFunc func(*EvictContext)
+}
+
+// OnLoad calls OnLoadFunc.
+func (f *HookFuncs) OnLoad(c *LoadContext) {
+	if f.OnLoadFunc != nil {
+		f.OnLoadFunc(c)
+	}
+}
+
+// OnEvict calls OnEvictFunc.
+func (f *HookFuncs) OnEvict(c *EvictContext) {
+	if f.OnEvictFunc != nil {
+		f.OnEvictFunc(c)
+	}
 }
 
 // OnRoute calls OnRouteFunc.
@@ -121,9 +182,11 @@ func checkHooks(hooks []any) error {
 			return fmt.Errorf("router: hook %d (%T) cannot be compared, so it could never be removed; pass a pointer", i, h)
 		}
 		_, route := h.(RouteHook)
+		_, load := h.(LoadHook)
+		_, evict := h.(EvictHook)
 		_, predict := h.(agent.Hook)
-		if !route && !predict {
-			return fmt.Errorf("router: hook %d (%T) implements neither OnRoute nor agent.Hook", i, h)
+		if !route && !load && !evict && !predict {
+			return fmt.Errorf("router: hook %d (%T) implements none of OnRoute, OnLoad, OnEvict or agent.Hook", i, h)
 		}
 	}
 	return nil
@@ -330,4 +393,43 @@ func (r *Router) dispatchRoute(state any, qs schema.Questions, d Decision, c cal
 		return d, err
 	}
 	return rc.Decision, nil
+}
+
+// dispatchLifecycle runs one lifecycle event over the hooks that implement it, with the Router's
+// own policy; a call has no overrides. pick returns the hook's call, or nil when it lacks the
+// event. It must be called with no lock of the lifecycle held.
+func (r *Router) dispatchLifecycle(event string, pick func(h any) func()) error {
+	var calls []func()
+	var all []any
+	for _, h := range r.composeHooks(call{}) {
+		if f := pick(h); f != nil {
+			calls, all = append(calls, f), append(all, h)
+		}
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+	run := hookrun.Run{Lock: r.hk.lock, Policy: hookrun.Policy{Timeout: r.hk.timeout, Raise: r.hk.raise, Warn: r.hk.warn}}
+	return run.Dispatch(context.Background(), event, len(calls),
+		func(i int) string { return hookrun.Name(all[i]) }, func(i int) { calls[i]() })
+}
+
+func (r *Router) dispatchLoad(key Checkpoint, a *agent.Agent) error {
+	ctx := &LoadContext{Model: key, Agent: a, RunID: newRunID(), Router: r}
+	return r.dispatchLifecycle("on_load", func(h any) func() {
+		if lh, ok := h.(LoadHook); ok {
+			return func() { lh.OnLoad(ctx) }
+		}
+		return nil
+	})
+}
+
+func (r *Router) dispatchEvict(key Checkpoint) error {
+	ctx := &EvictContext{Model: key, RunID: newRunID(), Router: r}
+	return r.dispatchLifecycle("on_evict", func(h any) func() {
+		if eh, ok := h.(EvictHook); ok {
+			return func() { eh.OnEvict(ctx) }
+		}
+		return nil
+	})
 }

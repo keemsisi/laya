@@ -4,6 +4,16 @@
 // hooks.go) may observe or replace the decision. Loading and routed inference are separate
 // changes.
 //
+// # Loading
+//
+// A Router built with WithAgentFactory also owns the models' lifecycle, as laya's Router does:
+// Load and Lease build a checkpoint on first use, concurrent callers share one build, a build that
+// fails is not cached, and at most WithMaxLoaded (default 2) stay resident, the least recently used
+// leaving first. Lease is the addition Go needs: an evicted agent closes only when its last Lease
+// is closed, so a prediction in flight never meets a closed session. Attach hands in an agent the
+// caller built, Preload builds checkpoints up front, Unload, UnloadAll and Close free them.
+// OnLoad and OnEvict hooks run after every internal lock is released.
+//
 // The checkpoints are English, Multilingual and TypedDecisions. The order of the evidence is
 // fixed, first match wins:
 //
@@ -25,8 +35,10 @@
 // A name is a string: Python's str(name) of a non-string has no counterpart. Router.register and
 // the custom checkpoints are not ported, so the Router knows the three built-in names. A hint
 // callable is a LangHint returning "" to abstain. explain=True is not ported: lang.Analysis has no
-// diagnostic field. The model lifecycle (on_load,
-// on_evict) belongs to a later change. Hooks run concurrently as in Python; WithSerialHooks
+// diagnostic field. Loading needs an AgentFactory: there is no hub download. WithMaxLoaded below 1
+// is an error, where Python clamps it to 1. Attach of a name the Router does not know is an error,
+// where Python registers it. Load returns an agent that closes on eviction; Lease keeps it open.
+// Attach and Preload raise MaxLoaded as in Python. Hooks run concurrently as in Python; WithSerialHooks
 // runs one at a time (and then a hook must not call Route on its own Router). A hook failure
 // names the hook's Go type.
 package router

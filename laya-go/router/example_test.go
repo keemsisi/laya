@@ -1,8 +1,10 @@
 package router_test
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/NandhaKishorM/laya/laya-go/agent"
 	"github.com/NandhaKishorM/laya/laya-go/router"
 	"github.com/NandhaKishorM/laya/laya-go/schema"
 )
@@ -81,4 +83,21 @@ func ExampleRouter_AddHook() {
 	// Output:
 	// saw english
 	// multilingual | pinned by policy
+}
+
+func ExampleRouter_Lease() {
+	// The factory owns where a checkpoint comes from; a real one opens the weights with
+	// agent.Open and an onnx session. This one stands in.
+	var open router.AgentFactory = func(ctx context.Context, c router.Checkpoint) (*agent.Agent, error) {
+		return nil, fmt.Errorf("no weights for %s in this example", c)
+	}
+	r, _ := router.New(router.WithAgentFactory(open), router.WithMaxLoaded(1))
+	defer r.Close()
+
+	_, err := r.Lease(context.Background(), "english")
+	fmt.Println(err)
+	fmt.Println(r.Loaded(), r.MaxLoaded())
+	// Output:
+	// router: cannot load the english checkpoint: no weights for english in this example
+	// [] 1
 }
