@@ -341,6 +341,7 @@ func TestColdBuildsAreSerialised(t *testing.T) {
 	go func() { defer wg.Done(); r.Load(context.Background(), "multilingual") }()
 	select {
 	case c := <-f.entered:
+		close(gate)
 		t.Fatalf("%s entered the factory while another build was in it", c)
 	case <-time.After(100 * time.Millisecond):
 	}
@@ -562,7 +563,10 @@ func TestAttachWhileBuildingKeepsTheAttachedAgent(t *testing.T) {
 	f := newFactory(t)
 	f.entered = make(chan router.Checkpoint, 4)
 	gate := f.open(en)
-	r := newRouter(t, f)
+	var loadedAgent *agent.Agent
+	var hmu sync.Mutex
+	hook := &router.HookFuncs{OnLoadFunc: func(c *router.LoadContext) { hmu.Lock(); loadedAgent = c.Agent; hmu.Unlock() }}
+	r := newRouter(t, f, router.WithInstalledHooks(hook))
 	attached := newProbe(t, nil)
 	res := make(chan *agent.Agent, 1)
 	go func() { a, _ := r.Load(context.Background(), "english"); res <- a }()
@@ -574,6 +578,11 @@ func TestAttachWhileBuildingKeepsTheAttachedAgent(t *testing.T) {
 	if got := <-res; got != attached {
 		t.Fatal("the build overwrote the attached agent")
 	}
+	hmu.Lock()
+	if loadedAgent != attached {
+		t.Fatal("on_load saw the discarded build, not the agent the Router serves")
+	}
+	hmu.Unlock()
 	f.mu.Lock()
 	dup := f.made[0]
 	f.mu.Unlock()
