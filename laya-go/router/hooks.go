@@ -20,7 +20,8 @@ package router
 // A hook may replace ctx.Decision; the replacement is what Route returns. Route does not check
 // it: a Model that names no checkpoint is the hook's business, and the caller that loads it
 // sees the error. A hook that overruns WithHookTimeout is abandoned, not stopped (see
-// agent/hooks.go).
+// agent/hooks.go). After a timeout the call gives its lease back, so the agent in an abandoned
+// OnLoad hook's context may be closed while that hook still runs.
 
 import (
 	"context"

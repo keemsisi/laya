@@ -210,3 +210,26 @@ func TestStressLeaseAccountingWithCancellation(t *testing.T) {
 		}
 	}
 }
+
+func TestPreloadKeepsItsLeaseAcrossTheLoadHook(t *testing.T) {
+	f := newFactory(t)
+	r := newRouter(t, f)
+	var sawClosed atomic.Bool
+	var once sync.Once
+	r.AddHook(&router.HookFuncs{OnLoadFunc: func(c *router.LoadContext) {
+		once.Do(func() {
+			go r.Unload(context.Background(), "english") // frees the checkpoint under the hook
+			b := f.of(c.Agent)
+			for i := 0; i < 100 && b.sess.closes.Load() == 0; i++ {
+				time.Sleep(5 * time.Millisecond)
+			}
+			sawClosed.Store(b.sess.closes.Load() > 0)
+		})
+	}})
+	if err := r.Preload(context.Background(), "english"); err != nil {
+		t.Fatal(err)
+	}
+	if sawClosed.Load() {
+		t.Fatal("OnLoad held an agent that a concurrent Unload closed")
+	}
+}

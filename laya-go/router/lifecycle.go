@@ -238,12 +238,7 @@ func (l *lifecycle) create(ctx context.Context, key Checkpoint) (*agent.Agent, e
 // doBuild is the build this caller owns: mine is the handle the others wait on.
 func (l *lifecycle) doBuild(ctx context.Context, key Checkpoint, mine *inflight, out *outcome) (built *slot, err error) {
 	var toClose []*agent.Agent
-	finished := false
-	finish := func() { // mu is held; idempotent
-		if finished {
-			return
-		}
-		finished = true
+	finish := func() { // mu is held; runs once: nothing after it can panic (closes are safeClose)
 		if l.loading[key] == mine {
 			delete(l.loading, key)
 		}
@@ -257,9 +252,7 @@ func (l *lifecycle) doBuild(ctx context.Context, key Checkpoint, mine *inflight,
 		if err != nil {
 			built = nil
 			l.mu.Lock()
-			if mine.err == nil && !finished {
-				mine.err = err
-			}
+			mine.err = err
 			finish()
 			l.mu.Unlock()
 		}
@@ -410,7 +403,8 @@ func (r *Router) Lease(ctx context.Context, name string) (*Lease, error) {
 // Load returns the agent for a checkpoint, building it on first use. Concurrent callers share one
 // build. The agent is valid only while it stays resident: eviction and Unload close an agent the
 // Router built, so a reference held across either is a closed session. Use Lease, which holds the
-// agent open, unless the caller manages the lifetime itself. If a hook fails Load returns the
+// agent open, unless the caller manages the lifetime itself. If an OnLoad hook unloads, or closes
+// the Router, for the same checkpoint, Load returns an agent that is already closed and no error. If a hook fails Load returns the
 // error and no agent, and the checkpoint stays resident.
 func (r *Router) Load(ctx context.Context, name string) (*agent.Agent, error) {
 	key, err := NormaliseName(name)
@@ -512,8 +506,8 @@ func (r *Router) Preload(ctx context.Context, names ...string) error {
 		if err != nil {
 			return err
 		}
-		rerr := l.release(s)
-		if herr := r.dispatchOutcome(key, out); herr != nil || rerr != nil {
+		herr := r.dispatchOutcome(key, out) // the lease is held across the hooks, as in Load
+		if rerr := l.release(s); herr != nil || rerr != nil {
 			return errors.Join(herr, rerr)
 		}
 	}
