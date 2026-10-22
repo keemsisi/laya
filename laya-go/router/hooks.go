@@ -11,8 +11,9 @@ package router
 // The dispatch is internal/hookrun, the one the agent uses, so ordering, WithHookErrors,
 // WithHookTimeout and panic recovery behave as there. As in Python's Router, hooks run
 // concurrently unless WithSerialHooks is given; with it, one hook runs at a time across all
-// goroutines, and a hook must not call Route on the Router that is running it (Python's lock is
-// re-entrant, this one is not, so the call would wait for itself until a timeout). A hook is
+// goroutines, and a hook must not call Route, or Load, Lease, Preload, Unload, UnloadAll or Close
+// when they would fire a hook, on the Router that is running it (Python's lock is re-entrant, this
+// one is not, so the call would wait for itself until a timeout). A hook is
 // compared by identity, so pass a pointer: a value whose type cannot be compared is refused.
 //
 // A hook may replace ctx.Decision; the replacement is what Route returns. Route does not check
@@ -234,7 +235,7 @@ func WithHookErrors(raise bool) Option {
 
 // WithSerialHooks runs one hook at a time across all calls, for hooks that are not safe to run
 // concurrently; the default, as in Python, lets hooks of concurrent calls overlap. A serial hook
-// must not call Route on its own Router: the lock is not re-entrant and the call would wait for
+// must not call Route, or a Load that builds or evicts, on its own Router: the lock is not re-entrant and the call would wait for
 // itself.
 func WithSerialHooks() Option {
 	return func(c *config) error { c.hooks.serial = true; return nil }

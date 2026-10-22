@@ -78,11 +78,6 @@ type lifeBoth struct{ lifeAct }
 func (h *lifeBoth) OnLoad(c *router.LoadContext)   { h.onLoad(c) }
 func (h *lifeBoth) OnEvict(c *router.EvictContext) { h.onEvict(c) }
 
-type lifeRoute struct{ router.BaseHook }
-
-func (lifeRoute) OnLoad(*router.LoadContext)   {}
-func (lifeRoute) OnEvict(*router.EvictContext) {}
-
 type lifeOnlyRoute struct{}
 
 func (lifeOnlyRoute) OnRoute(*router.RouteContext) {}
