@@ -31,6 +31,7 @@ TEST(RouterGoldenSize, FamiliesKeepTheirSize) {
 class NamesChunk : public ::testing::TestWithParam<int> {};
 TEST_P(NamesChunk, MatchPython) {
   LAYA_GOLDEN_LIST(rows, kFile, "router", "names");
+  LAYA_EXPECT_ROWS(rows, 263);
   size_t lo = size_t(GetParam()) * laya_test::kChunk, hi = std::min(rows->size(), lo + laya_test::kChunk);
   for (size_t i = lo; i < hi; i++) {
     const Value& rec = rows->value(i);
@@ -55,11 +56,12 @@ TEST_P(NamesChunk, MatchPython) {
     }
   }
 }
-INSTANTIATE_TEST_SUITE_P(Rows, NamesChunk, ::testing::ValuesIn(laya_test::Chunks(kFile, {"router", "names"})));
+INSTANTIATE_TEST_SUITE_P(Rows, NamesChunk, ::testing::ValuesIn(laya_test::Chunks(263)));
 
 class CodesChunk : public ::testing::TestWithParam<int> {};
 TEST_P(CodesChunk, MatchPython) {
   LAYA_GOLDEN_LIST(rows, kFile, "router", "codes");
+  LAYA_EXPECT_ROWS(rows, 279);
   size_t lo = size_t(GetParam()) * laya_test::kChunk, hi = std::min(rows->size(), lo + laya_test::kChunk);
   for (size_t i = lo; i < hi; i++) {
     const Value& rec = rows->value(i);
@@ -74,7 +76,7 @@ TEST_P(CodesChunk, MatchPython) {
     }
   }
 }
-INSTANTIATE_TEST_SUITE_P(Rows, CodesChunk, ::testing::ValuesIn(laya_test::Chunks(kFile, {"router", "codes"})));
+INSTANTIATE_TEST_SUITE_P(Rows, CodesChunk, ::testing::ValuesIn(laya_test::Chunks(279)));
 
 TEST(RouterWorkflowGolden, MatchPython) {
   LAYA_GOLDEN_LIST(rows, kFile, "router", "workflows");
@@ -93,13 +95,14 @@ TEST(RouterWorkflowGolden, MatchPython) {
 class RoutesChunk : public ::testing::TestWithParam<int> {};
 TEST_P(RoutesChunk, MatchPython) {
   LAYA_GOLDEN_LIST(rows, kFile, "router", "routes");
+  LAYA_EXPECT_ROWS(rows, 1058);
   size_t lo = size_t(GetParam()) * laya_test::kChunk, hi = std::min(rows->size(), lo + laya_test::kChunk);
   for (size_t i = lo; i < hi; i++) {
     std::string diff = rc::CheckRoute(rows->value(i));
     EXPECT_EQ(diff, "") << i << " " << rc::Str(rows->value(i).Find("case"));
   }
 }
-INSTANTIATE_TEST_SUITE_P(Rows, RoutesChunk, ::testing::ValuesIn(laya_test::Chunks(kFile, {"router", "routes"})));
+INSTANTIATE_TEST_SUITE_P(Rows, RoutesChunk, ::testing::ValuesIn(laya_test::Chunks(1058)));
 
 TEST(RouterRoutesGolden, CoversBothOutcomes) {
   LAYA_GOLDEN_LIST(rows, kFile, "router", "routes");
